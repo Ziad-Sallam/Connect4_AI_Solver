@@ -1,15 +1,18 @@
 import math
 import copy
 import time
+import json
 from Connect4 import Connect4
 
 
 class Connect4AI_Expectiminimax:
-    def __init__(self, game, max_depth=4, show_tree=True):
+    def __init__(self, game, max_depth=4, show_tree=False):
         self.game = game
         self.max_depth = max_depth
         self.show_tree = show_tree
         self.node_count = 0
+        self.tree_data = None
+        self.node_id_counter = 0
 
     def get_valid_moves(self, board):
         valid = []
@@ -39,14 +42,24 @@ class Connect4AI_Expectiminimax:
 
         return False
 
+    def board_to_string(self, board):
+        """Convert board to string representation"""
+        result = []
+        for r in range(self.game.length - 1, -1, -1):
+            row = []
+            for c in range(self.game.width):
+                row.append(str(board[c][r]))
+            result.append(''.join(row))
+        return '\n'.join(result)
+
     def print_node(self, depth, move, value, node_type, probability=None):
         """Print a node in the search tree"""
         if not self.show_tree:
             return
-        
+
         indent = "  " * (self.max_depth - depth)
         self.node_count += 1
-        
+
         # Node type indicator
         if node_type == "MAX":
             type_symbol = "▲"
@@ -56,13 +69,13 @@ class Connect4AI_Expectiminimax:
             type_symbol = "◆"
         else:
             type_symbol = "●"
-        
+
         # Format the move
         if move is not None:
             move_str = f"Col {move}"
         else:
             move_str = "ROOT"
-        
+
         # Format the value
         if value == math.inf:
             value_str = "+∞"
@@ -70,22 +83,26 @@ class Connect4AI_Expectiminimax:
             value_str = "-∞"
         else:
             value_str = f"{value:+.1f}"
-        
+
         # Build the output string
         output = f"{indent}{type_symbol} [{move_str}]"
-        
+
         # Add probability for chance nodes
         if probability is not None:
             output += f" P={probability:.1%}"
-        
+
         output += f" Value: {value_str}"
-        
+
         print(output)
 
-    def expectation_value(self, board, chosen_col, depth, maximizing, parent_move=None):
+    def expectation_value(self, board, chosen_col, depth, maximizing, parent_move=None, parent_id=None):
         """
         Chance node: disc may fall left or right with given probabilities
         """
+        # Create chance node
+        chance_node_id = self.node_id_counter
+        self.node_id_counter += 1
+
         player = 1 if maximizing else 2
         valid = self.get_valid_moves(board)
 
@@ -104,120 +121,284 @@ class Connect4AI_Expectiminimax:
                 normalized[c] = p
                 total += p
 
+        # Create chance node structure
+        chance_node = {
+            'id': chance_node_id,
+            'parent_id': parent_id,
+            'depth': depth,
+            'move': parent_move,
+            'node_type': 'CHANCE',
+            'chosen_col': chosen_col,
+            'board_state': self.board_to_string(board),
+            'probability_distribution': {},
+            'outcomes': [],
+            'expected_value': 0,
+            'valid_moves': valid
+        }
+
         # Redistribute probability if needed
         if total == 0:
             tmp = copy.deepcopy(self.game)
             tmp.board = board
             value = tmp.advanced_dynamic_heuristic()
-            self.print_node(depth, parent_move, value, "CHANCE (no valid)")
-            return None, value
+            chance_node['expected_value'] = value
+            chance_node['note'] = 'No valid outcomes'
+
+            if self.show_tree:
+                self.print_node(depth, parent_move, value, "CHANCE (no valid)")
+
+            return chance_node, value
 
         for c in normalized:
             normalized[c] /= total
 
+        chance_node['probability_distribution'] = {str(k): v for k, v in normalized.items()}
+
         # Print chance node
-        self.print_node(depth, parent_move, 0, "CHANCE")
+        if self.show_tree:
+            self.print_node(depth, parent_move, 0, "CHANCE")
 
         expected_value = 0
 
         for move, prob in normalized.items():
             new_board = self.simulate(board, move, player)
-            _, value = self.expectiminimax(new_board, depth - 1, not maximizing, move)
-            
+            child_node, value = self.expectiminimax(new_board, depth - 1, not maximizing, move, chance_node_id)
+
+            outcome = {
+                'actual_column': move,
+                'probability': prob,
+                'value': value,
+                'contribution': prob * value,
+                'child_node': child_node
+            }
+
+            chance_node['outcomes'].append(outcome)
+
             # Print each outcome with its probability
-            indent = "  " * (self.max_depth - depth + 1)
-            print(f"{indent}  → Outcome Col {move}: P={prob:.1%}, V={value:+.1f}, Contrib={prob*value:+.1f}")
-            
+            if self.show_tree:
+                indent = "  " * (self.max_depth - depth + 1)
+                print(f"{indent}  → Outcome Col {move}: P={prob:.1%}, V={value:+.1f}, Contrib={prob * value:+.1f}")
+
             expected_value += prob * value
 
+        chance_node['expected_value'] = expected_value
+
         # Print final expected value
-        indent = "  " * (self.max_depth - depth)
-        print(f"{indent}  Expected Value: {expected_value:+.1f}")
+        if self.show_tree:
+            indent = "  " * (self.max_depth - depth)
+            print(f"{indent}  Expected Value: {expected_value:+.1f}")
 
-        return None, expected_value
+        return chance_node, expected_value
 
-    def expectiminimax(self, board, depth, maximizing, move=None):
+    def expectiminimax(self, board, depth, maximizing, move=None, parent_id=None):
         """
-        Expectiminimax core with tree visualization
+        Expectiminimax core with tree visualization and structure capture
         """
+        # Create node
+        node_id = self.node_id_counter
+        self.node_id_counter += 1
+
         valid = self.get_valid_moves(board)
+
+        node = {
+            'id': node_id,
+            'parent_id': parent_id,
+            'depth': depth,
+            'move': move,
+            'node_type': 'MAX' if maximizing else 'MIN',
+            'board_state': self.board_to_string(board),
+            'children': [],
+            'value': None,
+            'best_move': None,
+            'terminal': False,
+            'valid_moves': valid
+        }
 
         if depth == 0 or self.is_terminal(board):
             tmp = copy.deepcopy(self.game)
             tmp.board = board
             value = tmp.advanced_dynamic_heuristic()
-            
+
+            node['terminal'] = True
+            node['terminal_type'] = 'LEAF' if depth == 0 else 'TERMINAL'
+            node['value'] = value
+
             node_label = "LEAF" if depth == 0 else "TERMINAL"
-            self.print_node(depth, move, value, node_label)
-            return None, value
+            if self.show_tree:
+                self.print_node(depth, move, value, node_label)
+
+            return node, value
 
         node_type = "MAX" if maximizing else "MIN"
 
         if maximizing:
             best_value = -math.inf
             best_move = None
-            
-            self.print_node(depth, move, best_value, node_type)
+
+            if self.show_tree:
+                self.print_node(depth, move, best_value, node_type)
 
             for child_move in valid:
-                _, value = self.expectation_value(board, child_move, depth, True, child_move)
+                chance_node, value = self.expectation_value(board, child_move, depth, True, child_move, node_id)
+
+                node['children'].append(chance_node)
+
                 if value > best_value:
                     best_value = value
                     best_move = child_move
 
-            return best_move, best_value
+            node['value'] = best_value
+            node['best_move'] = best_move
+            return node, best_value
 
         else:
             # Minimizing player (opponent)
             best_value = math.inf
             best_move = None
-            
-            self.print_node(depth, move, best_value, node_type)
+
+            if self.show_tree:
+                self.print_node(depth, move, best_value, node_type)
 
             for child_move in valid:
-                _, value = self.expectation_value(board, child_move, depth, False, child_move)
+                chance_node, value = self.expectation_value(board, child_move, depth, False, child_move, node_id)
+
+                node['children'].append(chance_node)
+
                 if value < best_value:
                     best_value = value
                     best_move = child_move
 
-            return best_move, best_value
+            node['value'] = best_value
+            node['best_move'] = best_move
+            return node, best_value
 
     def best_move(self):
-        """Get the best move and print the search tree"""
+        """Get the best move and save the tree"""
+        self.node_id_counter = 0
         self.node_count = 0
-        
+
         if self.show_tree:
-            print("\n" + "="*70)
+            print("\n" + "=" * 70)
             print("EXPECTIMINIMAX SEARCH TREE (with Chance Nodes)")
-            print("="*70)
+            print("=" * 70)
             print("Legend: ▲=MAX  ▼=MIN  ◆=CHANCE  ●=LEAF/TERMINAL")
-            print("="*70)
-        
+            print("=" * 70)
+
         start_time = time.time()
-        
-        move, value = self.expectiminimax(
+
+        tree_root, value = self.expectiminimax(
             self.game.board,
             self.max_depth,
             maximizing=(self.game.turn == 1),
-            move=None
+            move=None,
+            parent_id=None
         )
-        
-        elapsed = time.time() - start_time
-        
-        if self.show_tree:
-            print("="*70)
-            print(f"Best Move: Column {move} | Expected Value: {value:.1f}")
-            print(f"Nodes Explored: {self.node_count}")
-            print(f"Time: {elapsed:.3f} seconds")
-            print("="*70 + "\n")
 
-        if move is None:
+        elapsed = time.time() - start_time
+
+        # Save tree data
+        self.tree_data = {
+            'root': tree_root,
+            'metadata': {
+                'algorithm': 'expectiminimax',
+                'max_depth': self.max_depth,
+                'total_nodes': self.node_id_counter,
+                'best_move': tree_root['best_move'],
+                'expected_value': value,
+                'computation_time': elapsed,
+                'current_turn': self.game.turn,
+                'board_width': self.game.width,
+                'board_height': self.game.length,
+                'note': 'Includes CHANCE nodes for probabilistic outcomes'
+            }
+        }
+
+        if self.show_tree:
+            print("=" * 70)
+            print(f"Best Move: Column {tree_root['best_move']} | Expected Value: {value:.1f}")
+            print(f"Nodes Explored: {self.node_id_counter}")
+            print(f"Time: {elapsed:.3f} seconds")
+            print("=" * 70 + "\n")
+
+        if tree_root['best_move'] is None:
             valid = self.get_valid_moves(self.game.board)
             if valid:
                 return valid[0]
             return 0
 
-        return move
+        return tree_root['best_move']
+
+    def save_tree_to_json(self, filename='expectiminimax_tree.json'):
+        """Save the tree to a JSON file"""
+        if self.tree_data is None:
+            print("No tree data available. Run best_move() first.")
+            return False
+
+        try:
+            with open(filename, 'w') as f:
+                json.dump(self.tree_data, f, indent=2)
+            print(f"✓ Tree saved to {filename}")
+            return True
+        except Exception as e:
+            print(f"✗ Error saving tree: {e}")
+            return False
+
+    def save_tree_to_python(self, filename='expectiminimax_tree.py'):
+        """Save the tree as a Python dictionary"""
+        if self.tree_data is None:
+            print("No tree data available. Run best_move() first.")
+            return False
+
+        try:
+            with open(filename, 'w') as f:
+                f.write("# Auto-generated expectiminimax tree data\n")
+                f.write("# Import this in your GUI: from expectiminimax_tree import tree_data\n\n")
+                f.write(f"tree_data = {repr(self.tree_data)}")
+            print(f"✓ Tree saved to {filename}")
+            return True
+        except Exception as e:
+            print(f"✗ Error saving tree: {e}")
+            return False
+
+    def get_tree_stats(self):
+        """Get statistics about the tree"""
+        if self.tree_data is None:
+            return None
+
+        def count_nodes(node, stats):
+            stats['total'] += 1
+
+            node_type = node.get('node_type', 'UNKNOWN')
+
+            if node_type == 'MAX':
+                stats['max_nodes'] += 1
+            elif node_type == 'MIN':
+                stats['min_nodes'] += 1
+            elif node_type == 'CHANCE':
+                stats['chance_nodes'] += 1
+
+            if node.get('terminal', False):
+                stats['terminal'] += 1
+
+            # For chance nodes, count outcomes
+            for outcome in node.get('outcomes', []):
+                count_nodes(outcome['child_node'], stats)
+
+            # For regular nodes, count children
+            for child in node.get('children', []):
+                count_nodes(child, stats)
+
+        stats = {
+            'total': 0,
+            'max_nodes': 0,
+            'min_nodes': 0,
+            'chance_nodes': 0,
+            'terminal': 0
+        }
+
+        count_nodes(self.tree_data['root'], stats)
+
+        return stats
 
 
 if __name__ == "__main__":
