@@ -150,23 +150,23 @@ class Connect4AI:
         return move
 
 
+if __name__ == "__main__":
+
+    x = Connect4()
+    ai = Connect4AI(x, max_depth=6)
+
+    while True:
+        print(x)
+
+        if x.turn == 1:
+            col = int(input("Player 1 column: "))
+        else:
+
+            print("AI thinking...")
+            st_time = time.time()
+            col = ai.best_move()
+
+            print("AI thinking took {} seconds".format(time.time() - st_time))
 
 
-x = Connect4()
-ai = Connect4AI(x, max_depth=6)
-
-while True:
-    print(x)
-
-    if x.turn == 1:
-        col = int(input("Player 1 column: "))
-    else:
-
-        print("AI thinking...")
-        st_time = time.time()
-        col = ai.best_move()
-
-        print("AI thinking took {} seconds".format(time.time() - st_time))
-
-
-    x.play(col)
+        x.play(col)
